@@ -19,7 +19,7 @@ class ImageController extends Controller
     public function indexByCategory(Request $request, string $category)
     {
         // 1. Configurações de Paginação
-        $perPage = 30;
+        $perPage = 20;
         $page = $request->get('page', 1);
 
         // O prefixo do Bucket será o nome da categoria
