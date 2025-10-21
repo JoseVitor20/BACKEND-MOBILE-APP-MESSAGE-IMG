@@ -2,38 +2,64 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Routing\Controller;
+use Illuminate\Pagination\LengthAwarePaginator; // Importe este!
 
 class ImageController extends Controller
 {
     /**
-     * Lista as URLs de todas as imagens no bucket público.
-     * * @return \Illuminate\Http\JsonResponse
+     * Lista as imagens do Bucket com paginação manual.
+     *
+     * @param \Illuminate\Http\Request $request
+     * @return \Illuminate\Http\JsonResponse
      */
-    public function index()
+    public function index(Request $request)
     {
-        // Define o disco de armazenamento como 's3' (seu Object Storage/Bucket)
+        // 1. Configurações de Paginação
+        $perPage = 50;
+        $page = $request->get('page', 1); // Pega o número da página (padrão 1)
+        
+        // 2. Acesso ao Bucket
         $disk = Storage::disk('s3');
         
-        // Lista todos os arquivos (imagens) no diretório raiz do bucket
-        // Se suas imagens estiverem em subpastas, use $disk->allFiles('caminho/para/imagens')
-        $files = $disk->allFiles('');
+        // 3. Obtém TODAS as chaves (nomes) dos arquivos do bucket
+        // IMPORTANTE: Se o número de arquivos crescer muito (ex: 100k+), 
+        // esta linha pode começar a causar timeout ou esgotar a memória
+        $allFilePaths = $disk->allFiles('');
 
-        $imageUrls = [];
-        
-        foreach ($files as $filePath) {
-            // A visibilidade é pública, então usamos url() para gerar o link direto do CDN/Bucket.
-            $url = $disk->url($filePath);
-            
-            $imageUrls[] = $url;
+        // 4. Cria a lista de URLs
+        $allImageUrls = [];
+        foreach ($allFilePaths as $filePath) {
+            // Verifica se é uma imagem (opcional, mas recomendado)
+            if (preg_match('/\.(jpe?g|png|webp)$/i', $filePath)) {
+                $allImageUrls[] = $disk->url($filePath);
+            }
         }
 
-        return response()->json([
-            'status' => 'success',
-            'count' => count($imageUrls),
-            'images' => $imageUrls
-        ]);
+        // 5. Paginação Manual
+        $total = count($allImageUrls);
+        
+        // Cria a coleção para paginar
+        $items = collect($allImageUrls);
+
+        // Divide a coleção em "pedaços" de 50
+        $paginatedItems = $items->forPage($page, $perPage)->values();
+
+        // Cria o Paginator do Laravel
+        $imagePaginator = new LengthAwarePaginator(
+            $paginatedItems, // Apenas os 50 itens da página atual
+            $total,          // Total de itens
+            $perPage,        // Itens por página
+            $page,           // Página atual
+            [
+                'path' => $request->url(), // Caminho base para a paginação
+                'query' => $request->query(),
+            ]
+        );
+
+        // 6. Retorno (Já no formato padrão de paginação do Laravel)
+        return response()->json($imagePaginator->toArray());
     }
-}   
+}
