@@ -11,18 +11,15 @@ use Carbon\Carbon;
 
 class ImageController extends Controller
 {
-    const BATCH_SIZE = 20; 
-    
-    // Distribuição fixa de 20 imagens
-    const NOTIFICATION_DISTRIBUTION = [
-        'bom-dia' => 5,
-        'boa-noite' => 10,
-        'natal' => 5,
-    ];
-
+    // Categoria padrão usada para listagem paginada (a rota de notificação usa todas as categorias)
     const CATEGORIES = ['bom-dia', 'boa-noite', 'natal', 'ano-novo', 'aniversario']; 
+    
+    // Chave de cache para o lote de atualização mais recente (VITAL para a performance)
+    
     const CACHE_KEY_UPDATE_DATA = 'latest_update_notification_data';
-    const CACHE_TTL_MINUTES = 60 * 6; // Cache de 6 horas para proteger o S3
+    
+    // Cache de 6 horas para proteger o S3 de varreduras excessivas.
+    const CACHE_TTL_MINUTES = 60 * 6;
 
     /**
      * Lista as imagens do Bucket por categoria (pasta) com paginação (EXISTENTE).
@@ -31,7 +28,8 @@ class ImageController extends Controller
      */
     public function indexByCategory(Request $request, string $category)
     {
-        // ... (Seu código original de paginação manual do S3 aqui, sem alteração) ...
+        // Esta rota apenas lista todos os arquivos e não usa o cache de 6h para a varredura,
+        // mas o Laravel pode cachear as chamadas ao S3 internamente (sem intervenção manual).
         $perPage = 25;
         $page = $request->get('page', 1);
 
@@ -39,6 +37,7 @@ class ImageController extends Controller
         
         $disk = Storage::disk('s3');
         
+        // allFiles() é lento, mas necessário para a paginação sem DB.
         $allFilePaths = $disk->allFiles($bucketPrefix); 
 
         $allImageUrls = collect($allFilePaths)
@@ -68,29 +67,28 @@ class ImageController extends Controller
     }
 
     /**
-     * Lógica Crucial: Encontra o último número de 'update' no S3 e retorna as URLs correspondentes.
-     * Salva o resultado no cache por 6 horas para proteger o S3.
+     * Helper: Encontra o último número de 'update' no S3, filtra os arquivos correspondentes
+     * e retorna as URLs. O resultado é CACHEADO usando o driver 'file'.
+     * * Esta operação é custosa e só deve ser executada quando o cache expirar.
      */
     private function getLatestUpdateBatchFromS3(): array
     {
-        // 1. Tenta buscar o resultado final do cache
-        $cachedData = Cache::get(self::CACHE_KEY_UPDATE_DATA);
+        // 1. Tenta buscar o resultado final do cache, FORÇANDO o driver 'file'
+        $cachedData = Cache::store('file')->get(self::CACHE_KEY_UPDATE_DATA);
 
         if ($cachedData !== null) {
             return $cachedData;
         }
         
-        // 2. Busca o número MÁXIMO de update (operação cara, rodará a cada 6h)
+        // Se o cache expirou, executa a lógica de varredura (operação custosa)
         $disk = Storage::disk('s3');
         $maxUpdateNumber = 0;
-        
-        // Regex para encontrar o número de update: (update_N.)
         $updateRegex = '/update_(\d+)\.(jpe?g|png|webp|gif)$/i';
         
+        // 2. Busca o número MÁXIMO de update em todas as categorias
         foreach (self::CATEGORIES as $category) {
             $allFilePaths = $disk->allFiles($category); 
             
-            // Busca o maior número de update dentro desta categoria
             $currentMax = collect($allFilePaths)
                 ->map(function ($filePath) use ($updateRegex) {
                     if (preg_match($updateRegex, $filePath, $matches)) {
@@ -113,49 +111,43 @@ class ImageController extends Controller
 
         // 4. Monta o lote final com base no maxUpdateNumber
         $finalUpdateSuffix = "update_{$maxUpdateNumber}.";
-        $finalRandomUrls = [];
+        $finalUrls = [];
 
-        foreach (self::NOTIFICATION_DISTRIBUTION as $category => $count) {
-            $categoryPrefix = $category . '/';
+        foreach (self::CATEGORIES as $category) {
             
-            // Pega APENAS os arquivos que contêm o sufixo exato (ex: '/bom-dia/imagem(X)update_2.png')
-            // CUIDADO: allFiles pode ser lento, mas é inevitável sem uma DB. 
-            // O cache de 6h protege o servidor.
             $filesInBatch = $disk->allFiles($category);
 
             $selectedUrls = collect($filesInBatch)
+                // Filtra APENAS os arquivos que contêm o sufixo exato (ex: '..._update_2.png')
                 ->filter(fn ($path) => str_contains($path, $finalUpdateSuffix))
-                // Mapeia para URL e limita à contagem necessária (5, 10 ou 5)
                 ->map(fn ($path) => $disk->url($path))
-                ->shuffle() // Garante a aleatoriedade se houver mais de 5, 10 ou 5 arquivos por update
-                ->take($count) 
                 ->all();
             
-            $finalRandomUrls = array_merge($finalRandomUrls, $selectedUrls);
+            $finalUrls = array_merge($finalUrls, $selectedUrls);
         }
 
-        // 5. Salva o resultado final no cache e o retorna
-        shuffle($finalRandomUrls); // Embaralha o lote final
+        // 5. Salva o resultado final no cache e o retorna, FORÇANDO o driver 'file'
+        shuffle($finalUrls); // Embaralha o lote final
 
         $result = [
             'update_number' => $maxUpdateNumber,
-            'data' => $finalRandomUrls,
+            'data' => $finalUrls,
         ];
 
-        Cache::put(self::CACHE_KEY_UPDATE_DATA, $result, Carbon::now()->addMinutes(self::CACHE_TTL_MINUTES));
+        Cache::store('file')->put(self::CACHE_KEY_UPDATE_DATA, $result, Carbon::now()->addMinutes(self::CACHE_TTL_MINUTES));
         
         return $result;
     }
 
     /**
-     * Endpoint: Retorna 20 URLs do lote de atualização mais recente.
-     * O Front-end usa o 'update_number' para gerenciar o estado e a notificação de 7 dias.
+     * Endpoint: Retorna todas as URLs do lote de atualização mais recente.
+     * O Front-end usa o 'update_number' para gerenciar o estado e o parcelamento.
      *
      * @return \Illuminate\Http\JsonResponse
      */
     public function getLatestNotificationBatch()
     {
-        // 1. Obtém os dados do S3 (ou do cache, que é a regra geral)
+        // 1. Obtém os dados do S3 (ou do cache, que agora usa explicitamente o driver 'file')
         $latestBatchData = $this->getLatestUpdateBatchFromS3();
         
         $urls = $latestBatchData['data'];
