@@ -20,16 +20,17 @@ class ImageController extends Controller
     // Cache de 6 horas para proteger o S3 de varreduras excessivas.
     const CACHE_TTL_MINUTES = 60 * 6;
 
-    // Constante com as extensões permitidas (Imagens, GIFs e Vídeos)
+    // Constante com as extensões permitidas (Imagens, GIFs e Vídeos: jpe?g, png, webp, gif, mp4, mov, webm)
     const ALLOWED_MEDIA_REGEX = '/\.(jpe?g|png|webp|gif|mp4|mov|webm)$/i'; 
 
-    // NOVO: Cache de 1 hora para a ordem randomizada de paginação por sessão
+    // Cache de 1 hora para a ordem randomizada de paginação por categoria (RESOLVE O ERRO DE SESSÃO)
     const PAGINATION_CACHE_TTL_MINUTES = 60; 
 
     /**
-     * Lista as imagens do Bucket por categoria (pasta) com paginação (EXISTENTE).
-     * Agora com randomização por sessão.
-     * @param string $category O nome da pasta/categoria.
+     * Lista as imagens do Bucket por categoria (pasta) com paginação.
+     * Implementa randomização da lista completa, mantendo a ordem estável por 60 minutos
+     * através do cache estático por categoria.
+     * * @param string $category O nome da pasta/categoria.
      * @return \Illuminate\Http\JsonResponse
      */
     public function indexByCategory(Request $request, string $category)
@@ -40,22 +41,21 @@ class ImageController extends Controller
         $bucketPrefix = $category;
         $disk = Storage::disk('s3');
 
-        // 1. CHAVE DE CACHE BASEADA NA SESSÃO
-        // Isso garante que cada sessão/usuário tenha uma ordem randomizada única e consistente.
-        $sessionId = $request->session()->getId();
-        $cacheKey = "images_random_{$category}_session_{$sessionId}";
+        // 1. CHAVE DE CACHE ESTÁTICA POR CATEGORIA
+        // Resolve o erro de sessão ao não depender de $request->session()->getId().
+        $cacheKey = "images_random_{$category}_static"; 
 
         // 2. Tenta buscar a lista randomizada do cache
         $allImageUrls = Cache::get($cacheKey);
 
         if ($allImageUrls === null) {
-            // Se não estiver no cache, carrega e randomiza
-
+            // Se o cache expirou, carrega e randomiza
+            
             // allFiles() é lento, mas necessário para a paginação sem DB.
             $allFilePaths = $disk->allFiles($bucketPrefix); 
 
             $allImageUrls = collect($allFilePaths)
-                // Filtra para incluir todas as imagens E os vídeos
+                // Filtro atualizado para incluir vídeos (mp4, mov, webm)
                 ->filter(fn ($filePath) => preg_match(self::ALLOWED_MEDIA_REGEX, $filePath))
                 ->map(fn ($filePath) => $disk->url($filePath))
                 ->values() 
@@ -64,7 +64,7 @@ class ImageController extends Controller
             // *** RANDOMIZAÇÃO APLICADA AQUI ***
             shuffle($allImageUrls);
 
-            // Armazena a lista randomizada no cache
+            // Armazena a lista randomizada no cache por 1 hora (tempo de vida)
             Cache::put($cacheKey, $allImageUrls, now()->addMinutes(self::PAGINATION_CACHE_TTL_MINUTES));
         }
         
