@@ -20,12 +20,15 @@ class ImageController extends Controller
     // Cache de 6 horas para proteger o S3 de varreduras excessivas.
     const CACHE_TTL_MINUTES = 60 * 6;
 
-    // NOVO: Constante com as extensões permitidas (Imagens, GIFs e Vídeos)
-    // Se o seu bucket tiver outros formatos de vídeo, adicione-os aqui.
+    // Constante com as extensões permitidas (Imagens, GIFs e Vídeos)
     const ALLOWED_MEDIA_REGEX = '/\.(jpe?g|png|webp|gif|mp4|mov|webm)$/i'; 
+
+    // NOVO: Cache de 1 hora para a ordem randomizada de paginação por sessão
+    const PAGINATION_CACHE_TTL_MINUTES = 60; 
 
     /**
      * Lista as imagens do Bucket por categoria (pasta) com paginação (EXISTENTE).
+     * Agora com randomização por sessão.
      * @param string $category O nome da pasta/categoria.
      * @return \Illuminate\Http\JsonResponse
      */
@@ -35,19 +38,37 @@ class ImageController extends Controller
         $page = $request->get('page', 1);
 
         $bucketPrefix = $category;
-        
         $disk = Storage::disk('s3');
+
+        // 1. CHAVE DE CACHE BASEADA NA SESSÃO
+        // Isso garante que cada sessão/usuário tenha uma ordem randomizada única e consistente.
+        $sessionId = $request->session()->getId();
+        $cacheKey = "images_random_{$category}_session_{$sessionId}";
+
+        // 2. Tenta buscar a lista randomizada do cache
+        $allImageUrls = Cache::get($cacheKey);
+
+        if ($allImageUrls === null) {
+            // Se não estiver no cache, carrega e randomiza
+
+            // allFiles() é lento, mas necessário para a paginação sem DB.
+            $allFilePaths = $disk->allFiles($bucketPrefix); 
+
+            $allImageUrls = collect($allFilePaths)
+                // Filtra para incluir todas as imagens E os vídeos
+                ->filter(fn ($filePath) => preg_match(self::ALLOWED_MEDIA_REGEX, $filePath))
+                ->map(fn ($filePath) => $disk->url($filePath))
+                ->values() 
+                ->all();
+
+            // *** RANDOMIZAÇÃO APLICADA AQUI ***
+            shuffle($allImageUrls);
+
+            // Armazena a lista randomizada no cache
+            Cache::put($cacheKey, $allImageUrls, now()->addMinutes(self::PAGINATION_CACHE_TTL_MINUTES));
+        }
         
-        // allFiles() é lento, mas necessário para a paginação sem DB.
-        $allFilePaths = $disk->allFiles($bucketPrefix); 
-
-        $allImageUrls = collect($allFilePaths)
-            // CORREÇÃO APLICADA AQUI: Usando a nova constante para incluir vídeos e imagens
-            ->filter(fn ($filePath) => preg_match(self::ALLOWED_MEDIA_REGEX, $filePath))
-            ->map(fn ($filePath) => $disk->url($filePath))
-            ->values() 
-            ->all();
-
+        // 3. Aplica a paginação na lista CACHEADA e randomizada
         $total = count($allImageUrls);
         
         $items = collect($allImageUrls);
@@ -85,7 +106,6 @@ class ImageController extends Controller
         // Se o cache expirou, executa a lógica de varredura (operação custosa)
         $disk = Storage::disk('s3');
         $maxUpdateNumber = 0;
-        // MANTIDO: O regex aqui só busca por imagens/gifs, pois a funcionalidade é de "update de notificação"
         $updateRegex = '/update_(\d+)\.(jpe?g|png|webp|gif)$/i'; 
         
         // 2. Busca o número MÁXIMO de update em todas as categorias
