@@ -20,7 +20,7 @@ class ImageController extends Controller
     // Cache de 6 horas para proteger o S3 de varreduras excessivas.
     const CACHE_TTL_MINUTES = 60 * 6;
 
-    // Constante com as extensões permitidas (Imagens, GIFs e Vídeos: jpe?g, png, webp, gif, mp4, mov, webm)
+    // Constante com as extensões permitidas (Imagens, GIFs e Vídeos)
     const ALLOWED_MEDIA_REGEX = '/\.(jpe?g|png|webp|gif|mp4|mov|webm)$/i'; 
 
     // Cache de 1 hora para a ordem randomizada de paginação por categoria (RESOLVE O ERRO DE SESSÃO)
@@ -42,11 +42,11 @@ class ImageController extends Controller
         $disk = Storage::disk('s3');
 
         // 1. CHAVE DE CACHE ESTÁTICA POR CATEGORIA
-        // Resolve o erro de sessão ao não depender de $request->session()->getId().
         $cacheKey = "images_random_{$category}_static"; 
 
         // 2. Tenta buscar a lista randomizada do cache
-        $allImageUrls = Cache::get($cacheKey);
+        // CORRIGIDO: FORÇA O DRIVER 'file' para evitar a dependência de um DB não configurado.
+        $allImageUrls = Cache::store('file')->get($cacheKey); 
 
         if ($allImageUrls === null) {
             // Se o cache expirou, carrega e randomiza
@@ -65,7 +65,8 @@ class ImageController extends Controller
             shuffle($allImageUrls);
 
             // Armazena a lista randomizada no cache por 1 hora (tempo de vida)
-            Cache::put($cacheKey, $allImageUrls, now()->addMinutes(self::PAGINATION_CACHE_TTL_MINUTES));
+            // CORRIGIDO: FORÇA O DRIVER 'file'.
+            Cache::store('file')->put($cacheKey, $allImageUrls, now()->addMinutes(self::PAGINATION_CACHE_TTL_MINUTES));
         }
         
         // 3. Aplica a paginação na lista CACHEADA e randomizada
