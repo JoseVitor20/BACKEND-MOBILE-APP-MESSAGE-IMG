@@ -12,14 +12,17 @@ use Carbon\Carbon;
 class ImageController extends Controller
 {
     // Categoria padrão usada para listagem paginada (a rota de notificação usa todas as categorias)
-    const CATEGORIES = ['bom-dia', 'boa-noite', 'natal', 'ano-novo', 'aniversario']; 
+    const CATEGORIES = ['bom-dia', 'boa-noite', 'natal', 'ano-novo', 'aniversario'];
     
     // Chave de cache para o lote de atualização mais recente (VITAL para a performance)
-    
     const CACHE_KEY_UPDATE_DATA = 'latest_update_notification_data';
     
     // Cache de 6 horas para proteger o S3 de varreduras excessivas.
     const CACHE_TTL_MINUTES = 60 * 6;
+
+    // NOVO: Constante com as extensões permitidas (Imagens, GIFs e Vídeos)
+    // Se o seu bucket tiver outros formatos de vídeo, adicione-os aqui.
+    const ALLOWED_MEDIA_REGEX = '/\.(jpe?g|png|webp|gif|mp4|mov|webm)$/i'; 
 
     /**
      * Lista as imagens do Bucket por categoria (pasta) com paginação (EXISTENTE).
@@ -28,8 +31,6 @@ class ImageController extends Controller
      */
     public function indexByCategory(Request $request, string $category)
     {
-        // Esta rota apenas lista todos os arquivos e não usa o cache de 6h para a varredura,
-        // mas o Laravel pode cachear as chamadas ao S3 internamente (sem intervenção manual).
         $perPage = 25;
         $page = $request->get('page', 1);
 
@@ -41,7 +42,8 @@ class ImageController extends Controller
         $allFilePaths = $disk->allFiles($bucketPrefix); 
 
         $allImageUrls = collect($allFilePaths)
-            ->filter(fn ($filePath) => preg_match('/\.(jpe?g|png|webp|gif)$/i', $filePath))
+            // CORREÇÃO APLICADA AQUI: Usando a nova constante para incluir vídeos e imagens
+            ->filter(fn ($filePath) => preg_match(self::ALLOWED_MEDIA_REGEX, $filePath))
             ->map(fn ($filePath) => $disk->url($filePath))
             ->values() 
             ->all();
@@ -83,7 +85,8 @@ class ImageController extends Controller
         // Se o cache expirou, executa a lógica de varredura (operação custosa)
         $disk = Storage::disk('s3');
         $maxUpdateNumber = 0;
-        $updateRegex = '/update_(\d+)\.(jpe?g|png|webp|gif)$/i';
+        // MANTIDO: O regex aqui só busca por imagens/gifs, pois a funcionalidade é de "update de notificação"
+        $updateRegex = '/update_(\d+)\.(jpe?g|png|webp|gif)$/i'; 
         
         // 2. Busca o número MÁXIMO de update em todas as categorias
         foreach (self::CATEGORIES as $category) {
