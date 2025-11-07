@@ -19,7 +19,7 @@ return [
         'http://localhost:3000',
         'http://127.0.0.1:3000',
         'http://10.0.0.104:8000', // Expo Dev Client
-        'exp://10.0.0.104:8000',,  // Expo
+        'exp://10.0.0.104:8000',  // Expo
         'http://localhost:8081/'// Expo Web
     ],
 
